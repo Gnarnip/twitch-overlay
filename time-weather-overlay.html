@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Rye&display=swap" rel="stylesheet">
+
+<style>
+  :root{
+    --gold:#FFD700;
+    --cycle-sec:6; /* seconds per card */
+  }
+  html,body{ margin:0; background:transparent; font-family:'Rye', cursive; }
+  .stage{ position:fixed; inset:0; display:flex; align-items:center; justify-content:center; }
+  .card{
+    position:absolute; opacity:0; transition:opacity 600ms ease;
+    color:var(--gold); font-weight:700; font-size:72px;
+    text-shadow:2px 2px 4px #000; pointer-events:none; user-select:none; white-space:nowrap;
+  }
+  .sub{ font-size:28px; font-weight:700; margin-left:14px; opacity:0.9; }
+  .show{ opacity:1; }
+  @media (max-width: 700px){ .card{ font-size:54px; } .sub{ font-size:22px; } }
+</style>
+
+<div class="stage">
+  <div id="timeCard" class="card">--:--</div>
+  <div id="tempCard" class="card">--°<span class="sub" id="tempUnit">C</span></div>
+  <div id="goldCard" class="card">$—<span class="sub">/oz</span></div>
+</div>
+
+<script>
+/*
+  URL Params (optional):
+  ?lat=64.06&lon=-139.43&units=C&tz=America/Whitehorse&cycle=6&currency=USD
+  - currency: USD (default) or CAD/EUR/GBP/AUD/NZD/JPY, etc.
+*/
+const p = new URLSearchParams(location.search);
+const LAT   = parseFloat(p.get('lat')   ?? '64.06');
+const LON   = parseFloat(p.get('lon')   ?? '-139.43');
+const UNITS = (p.get('units') ?? 'C').toUpperCase(); // 'C' or 'F'
+const TZ    = p.get('tz')     ?? 'America/Whitehorse';
+const CYCLE = Math.max(4, parseInt(p.get('cycle') ?? '6', 10));
+
+const CURRENCY = (p.get('currency') || 'USD').toUpperCase();
+const currencySymbols = { USD:'$', CAD:'C$', AUD:'A$', EUR:'€', GBP:'£', NZD:'NZ$', JPY:'¥' };
+const CUR_SYM = currencySymbols[CURRENCY] || (CURRENCY + ' ');
+
+document.documentElement.style.setProperty('--cycle-sec', String(CYCLE));
+
+const timeCard = document.getElementById('timeCard');
+const tempCard = document.getElementById('tempCard');
+const goldCard = document.getElementById('goldCard');
+const tempUnit = document.getElementById('tempUnit');
+
+// ----- Time -----
+function updateClock(){
+  try{
+    const now = new Date();
+    const t = now.toLocaleTimeString([], { hour:"2-digit", minute:"2-digit", hour12:true, timeZone:TZ });
+    timeCard.textContent = t;
+  }catch{
+    timeCard.textContent = '--:--';
+  }
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ----- Temperature (Open-Meteo) -----
+async function fetchTemp(){
+  try{
+    const tempUnitApi = UNITS === 'F' ? 'fahrenheit' : 'celsius';
+    const res = await fetch(
+      `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}&current=temperature_2m&temperature_unit=${tempUnitApi}&timezone=auto`,
+      { cache: 'no-store' }
+    );
+    const data = await res.json();
+    const t = Math.round(data?.current?.temperature_2m ?? NaN);
+    tempUnit.textContent = UNITS;
+    tempCard.firstChild.nodeValue = Number.isFinite(t) ? `${t}°` : `—°`;
+  }catch{
+    tempCard.firstChild.nodeValue = `—°`;
+    tempUnit.textContent = UNITS;
+  }
+}
+fetchTemp();
+setInterval(fetchTemp, 5*60*1000);
+
+// ===== GOLD PRICE (CORS-friendly via jsDelivr currency API) =====
+// Endpoint example:
+// https://cdn.jsdelivr.net/gh/fawazahmed0/currency-api@1/latest/currencies/usd/xau.json
+// Meaning: 1 USD = <rate> XAU  =>  price per ounce in USD = 1 / rate
+async function fetchGold(){
+  try{
+    const base = CURRENCY.toLowerCase();
+    const url  = `https://cdn.jsdelivr.net/gh/fawazahmed0/currency-api@1/latest/currencies/${base}/xau.json`;
+    const res  = await fetch(url, { cache:'no-store' });
+    const data = await res.json();
+    const rate = data?.xau; // XAU per 1 unit of base currency
+    if (rate && isFinite(rate) && rate > 0){
+      const pricePerOunce = 1 / rate; // base currency per ounce
+      goldCard.innerHTML = `${CUR_SYM}${pricePerOunce.toFixed(2)}<span class="sub">/oz</span>`;
+      return;
+    }
+    goldCard.innerHTML = `— <span class="sub">${CURRENCY}/oz</span>`;
+  }catch{
+    goldCard.innerHTML = `— <span class="sub">${CURRENCY}/oz</span>`;
+  }
+}
+fetchGold();
+setInterval(fetchGold, 5*60*1000);
+
+// ----- Crossfade cycle: time → temp → gold -----
+const cards = [timeCard, tempCard, goldCard];
+let idx = 0;
+function show(i){ cards.forEach((c, k) => c.classList.toggle('show', k === i)); }
+show(0);
+setInterval(() => { idx = (idx + 1) % cards.length; show(idx); }, CYCLE * 1000);
+</script>

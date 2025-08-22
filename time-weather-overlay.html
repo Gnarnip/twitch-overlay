@@ -14,6 +14,10 @@
   .sub{ font-size:28px; font-weight:700; margin-left:14px; opacity:0.9; }
   .show{ opacity:1; }
   @media (max-width: 700px){ .card{ font-size:54px; } .sub{ font-size:22px; } }
+
+  /* optional on-screen debug */
+  .dbg{ position:fixed; left:8px; bottom:8px; font:600 12px system-ui; color:#fff; background:#0009; padding:6px 8px; border-radius:8px; display:none; }
+  .dbg.on{ display:block; }
 </style>
 
 <div class="stage">
@@ -21,23 +25,26 @@
   <div id="tempCard" class="card">--°<span class="sub" id="tempUnit">C</span></div>
   <div id="goldCard" class="card">$—<span class="sub">/oz</span></div>
 </div>
+<div id="dbg" class="dbg"></div>
 
 <script>
-/* URL params: ?lat=64.06&lon=-139.43&units=C&tz=America/Whitehorse&cycle=6&currency=USD */
+/* URL params: ?lat=64.06&lon=-139.43&units=C&tz=America/Whitehorse&cycle=6&debug=1 */
 const p = new URLSearchParams(location.search);
 const LAT   = parseFloat(p.get('lat') ?? '64.06');
 const LON   = parseFloat(p.get('lon') ?? '-139.43');
 const UNITS = (p.get('units') ?? 'C').toUpperCase();
 const TZ    = p.get('tz') ?? 'America/Whitehorse';
 const CYCLE = Math.max(4, parseInt(p.get('cycle') ?? '6', 10));
-const CURRENCY = (p.get('currency') || 'USD').toUpperCase();
-
-const SYM = ({USD:'$', CAD:'C$', AUD:'A$', EUR:'€', GBP:'£', NZD:'NZ$', JPY:'¥'})[CURRENCY] || (CURRENCY+' ');
+const DEBUG = p.get('debug') === '1';
 
 const timeCard = document.getElementById('timeCard');
 const tempCard = document.getElementById('tempCard');
 const goldCard = document.getElementById('goldCard');
 const tempUnit = document.getElementById('tempUnit');
+const dbgEl    = document.getElementById('dbg');
+if (DEBUG) dbgEl.classList.add('on');
+
+function dbg(msg){ if (DEBUG) dbgEl.textContent = msg; }
 
 /* Time */
 function updateClock(){
@@ -63,61 +70,38 @@ async function fetchTemp(){
 }
 fetchTemp(); setInterval(fetchTemp, 5*60*1000);
 
-/* Gold price: try exchangerate.host (base=XAU) -> jsDelivr -> goldprice.org(proxy) */
+/* Gold price (USD/oz) via Yahoo Finance through a CORS-safe proxy */
 async function fetchGold(){
   try{
-    let price = await goldFromExchangerateHost(CURRENCY);               // direct price per oz in currency
-    if (!isFinite(price)) price = await goldFromJsDelivr(CURRENCY);     // invert XAU rate
-    if (!isFinite(price)) price = await goldFromGoldpriceOrg(CURRENCY); // xauPrice via proxy
-    if (isFinite(price)){
-      goldCard.innerHTML = `${SYM}${price.toFixed(2)}<span class="sub">/oz</span>`;
-      return;
+    // Yahoo spot gold (XAUUSD=X)
+    const y = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent('XAUUSD=X')}`;
+    const prox = `https://r.jina.ai/http/${encodeURIComponent(y)}`; // CORS-friendly proxy
+
+    const res = await fetch(prox, { cache:'no-store' });
+    const txt = await res.text();
+
+    // Pull the number directly from the text (regex)
+    // Look for: "regularMarketPrice":{"raw":<number>
+    let m = txt.match(/"regularMarketPrice":\{"raw":([\d.]+)/);
+    if (!m) {
+      // fallback to previous close if market price missing
+      m = txt.match(/"regularMarketPreviousClose":\{"raw":([\d.]+)/);
     }
-  }catch{}
-  goldCard.innerHTML = `— <span class="sub">${CURRENCY}/oz</span>`;
+    if (m) {
+      const price = parseFloat(m[1]);
+      if (isFinite(price)) {
+        goldCard.innerHTML = `$${price.toFixed(2)}<span class="sub">/oz</span>`;
+        dbg('gold: Yahoo via proxy');
+        return;
+      }
+    }
+    goldCard.innerHTML = `— <span class="sub">USD/oz</span>`;
+    dbg('gold: Yahoo parse failed');
+  }catch(e){
+    goldCard.innerHTML = `— <span class="sub">USD/oz</span>`;
+    dbg('gold: fetch failed');
+  }
 }
-
-// Source 1: exchangerate.host — base=XAU returns price per ounce in target currency
-async function goldFromExchangerateHost(cur){
-  try{
-    const url = `https://api.exchangerate.host/latest?base=XAU&symbols=${encodeURIComponent(cur)}`;
-    const res = await fetch(url, {cache:'no-store'});
-    const data = await res.json();
-    const rate = data?.rates?.[cur];
-    return (rate && isFinite(rate) && rate > 0) ? rate : NaN; // already currency per oz
-  }catch{ return NaN; }
-}
-
-// Source 2: jsDelivr currency API — returns XAU per 1 unit of currency; invert
-async function goldFromJsDelivr(cur){
-  try{
-    const base = cur.toLowerCase();
-    const url  = `https://cdn.jsdelivr.net/gh/fawazahmed0/currency-api@1/latest/currencies/${base}/xau.json`;
-    const res  = await fetch(url, {cache:'no-store'});
-    const data = await res.json();
-    const xauPer1 = data?.xau; // XAU per 1 unit of currency
-    return (xauPer1 && isFinite(xauPer1) && xauPer1 > 0) ? (1 / xauPer1) : NaN;
-  }catch{ return NaN; }
-}
-
-// Source 3: goldprice.org via proxy — has xauPrice (currency per oz)
-async function goldFromGoldpriceOrg(cur){
-  try{
-    const url  = `https://data-asg.goldprice.org/dbXRates/${encodeURIComponent(cur)}`;
-    const prox = `https://r.jina.ai/http/${encodeURIComponent(url)}`;
-    const res  = await fetch(prox, {cache:'no-store'});
-    const txt  = await res.text();
-    try{
-      const j = JSON.parse(txt);
-      const val = j?.items?.[0]?.xauPrice;
-      if (isFinite(val)) return val;
-    }catch{}
-    const m = txt.match(/"xauPrice"\s*:\s*([\d.]+)/);
-    if (m){ const val = parseFloat(m[1]); if (isFinite(val)) return val; }
-  }catch{}
-  return NaN;
-}
-
 fetchGold(); setInterval(fetchGold, 5*60*1000);
 
 /* Crossfade: time → temp → gold */
